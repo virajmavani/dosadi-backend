@@ -8,7 +8,9 @@ from langchain_community.vectorstores import Milvus
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain.agents import AgentExecutor, create_react_agent
 from langchain.schema import Document
+from langchain.tools.retriever import create_retriever_tool
 from pymilvus import connections, utility
 from datasets import load_dataset
 from pydantic import BaseModel
@@ -75,9 +77,10 @@ async def initializeVectorStore():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     template = """Answer the question based only on the following context:
-    {context}
-
-    Question: {question}
+    {agent_scratchpad}
+    {tool_names}
+    {tools} 
+    Question: What are the legal strategies for a refugee to stay in Canada?
     """
     prompt = PromptTemplate.from_template(template)
 
@@ -99,20 +102,33 @@ async def lifespan(app: FastAPI):
             ],
         },
     )
-
     retriever = vector_store.as_retriever()
-    
-    chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
+    tool = create_retriever_tool(
+        retriever,
+        "search_canadian_legal_data",
+        "Searches and returns laws from the Canadian Legal Data dataset.",
     )
+    tools = [tool]
 
-    agentsMap['chain'] = chain
+    agent = create_react_agent(llm, tools, prompt)
+    
+    
+
+    agent_executor = AgentExecutor(
+        agent=agent,
+        tool_names = ["search_canadian_legal_data"],
+        tools=tools,
+        verbose=True,
+        return_intermediate_steps=True,
+    )
+    response = agent_executor.invoke({"input": "Where is the hometown of the 2007 US PGA championship winner and his score?"})
+    print(response)
+
+    
     yield
     print("Shutdown")
-    #Clean up the ML models and release the resource
+    # Clean up the ML models and release the resource
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -138,5 +154,5 @@ def read_root():
 async def read_item(request: RequestBody):
     print("Starting new request...")
     print(f"{request.firstName}, {request.lastName}, {request.caseDescription}, {request.intendedOutcome}")
-    response = agentsMap["chain"].invoke(f"How big is the city of Boston?")
+    response = agentsMap["chain"].invoke()
     return response
