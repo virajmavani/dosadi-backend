@@ -1,0 +1,7 @@
+fastapi
+pymilvus 
+milvus 
+langchain 
+sentence-transformers 
+tiktoken 
+octoai-sdk
