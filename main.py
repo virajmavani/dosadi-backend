@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from langchain.prompts import PromptTemplate
 from langchain_community.llms.octoai_endpoint import OctoAIEndpoint
 from langchain_community.embeddings import OctoAIEmbeddings
@@ -23,6 +24,11 @@ user = os.getenv("MILVUS_USER")
 password = os.getenv("MILVUS_PASSWORD")
 
 agentsMap = {}
+
+origins = [
+    "http://localhost:3000",
+    "http://localhost:8080",
+]
 
 async def initializeVectorStore():
     embeddings = OctoAIEmbeddings(endpoint_url="https://text.octoai.run/v1/embeddings")
@@ -93,7 +99,7 @@ async def lifespan(app: FastAPI):
             ],
         },
     )
-    
+
     retriever = vector_store.as_retriever()
     
     chain = (
@@ -110,15 +116,27 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class RequestBody(BaseModel):
-   question: str
+    firstName: str
+    lastName: str
+    caseDescription: str
+    intendedOutcome: str
 
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
 
-@app.post("/")
-async def read_item(request_body: RequestBody):
+@app.post("/callDosadi")
+async def read_item(request: RequestBody):
     print("Starting new request...")
-    response = agentsMap["chain"].invoke(request_body.question)
+    print(f"{request.firstName}, {request.lastName}, {request.caseDescription}, {request.intendedOutcome}")
+    response = agentsMap["chain"].invoke(f"How big is the city of Boston?")
     return response
