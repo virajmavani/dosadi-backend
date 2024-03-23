@@ -9,7 +9,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain.schema import Document
 from pymilvus import connections, utility
-
+from datasets import load_dataset
 from pydantic import BaseModel
 
 from dotenv import load_dotenv
@@ -32,36 +32,37 @@ async def initializeVectorStore():
                         user=user,
                         password=password)
     print(f"Connecting to DB: {milvus_uri}")
-    collection_name = "cities"
+    collection_name = "canadian_legal_data"
+    
+    # Check if the collection exists
     check_collection = utility.has_collection(collection_name)
-    if check_collection:
-        print(f"Collection Available!")
+    if not check_collection:
+        # Load only the first file from the dataset for analysis
+        dataset = load_dataset("refugee-law-lab/canadian-legal-data")['train'][0]
+        file_text = dataset['unofficial_text']
+        text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
+            chunk_size=512, chunk_overlap=64,
+        )
+        texts = text_splitter.split_text(file_text)
+        file_texts = [Document(page_content=chunked_text,
+                               metadata={"doc_title": dataset["citation"], "chunk_num": i})
+                      for i, chunked_text in enumerate(texts)]
+        
+        # Create the Milvus vector store
+        vector_store = Milvus.from_documents(
+            file_texts,
+            embedding=embeddings,
+            connection_args={"uri": milvus_uri, "token": token},
+            collection_name=collection_name
+        )
+    else:
+        print("Collection already exists.")
         vector_store = Milvus(
             embeddings,
             connection_args={"uri": milvus_uri, "token": token},
             collection_name=collection_name,
         )
-    else:
-        files = os.listdir("./data")
-        file_texts = []
 
-        for file in files:
-            with open(f"./data/{file}") as f:
-                file_text = f.read()
-            text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
-                chunk_size=512, chunk_overlap=64, 
-            )
-            texts = text_splitter.split_text(file_text)
-            for i, chunked_text in enumerate(texts):
-                file_texts.append(Document(page_content=chunked_text, 
-                        metadata={"doc_title": file.split(".")[0], "chunk_num": i}))
-        
-        vector_store = Milvus.from_documents(
-            file_texts,
-            embedding=embeddings,
-            connection_args={"uri": milvus_uri, "token": token},
-            collection_name="cities"
-        )
     return vector_store
 
 
@@ -110,16 +111,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 class RequestBody(BaseModel):
-    bio1: str
-    bio2: str
+   question: str
 
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
 
 @app.post("/")
-async def read_item(request: RequestBody):
+async def read_item(request_body: RequestBody):
     print("Starting new request...")
-    response = agentsMap["chain"].invoke(f"How big is the city of Boston?")
-    print(str(response))
+    response = agentsMap["chain"].invoke(request_body.question)
     return response
