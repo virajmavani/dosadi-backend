@@ -46,7 +46,7 @@ async def initializeVectorStore():
     check_collection = utility.has_collection(collection_name)
     if not check_collection:
         # Load only the first file from the dataset for analysis
-        dataset = load_dataset("refugee-law-lab/canadian-legal-data")['train'][0]
+        dataset = load_dataset("refugee-law-lab/canadian-legal-data")['train']
         file_text = dataset['unofficial_text']
         text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
             chunk_size=512, chunk_overlap=64,
@@ -76,11 +76,25 @@ async def initializeVectorStore():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    template = """Answer the question based only on the following context:
-    {agent_scratchpad}
-    {tool_names}
-    {tools} 
-    Question: What are the legal strategies for a refugee to stay in Canada?
+    template = """Answer the following questions as best you can. You have access to the following tools:
+
+    {tools}
+
+    Use the following format:
+
+    Question: the input question you must answer
+    Thought: you should always think about what to do
+    Action: the action to take, should be one of [{tool_names}]
+    Action Input: the input to the action
+    Observation: the result of the action
+    ... (this Thought/Action/Action Input/Observation can repeat N times)
+    Thought: I now know the final answer
+    Final Answer: the final answer to the original input question
+
+    Begin!
+
+    Question: Given the case description: "{caseDescription}" and intended case outcome: "{intendedOutcome}, create a legal strategy to use in court."
+    Thought:{agent_scratchpad}
     """
     prompt = PromptTemplate.from_template(template)
 
@@ -106,13 +120,11 @@ async def lifespan(app: FastAPI):
     tool = create_retriever_tool(
         retriever,
         "search_canadian_legal_data",
-        "Searches and returns laws from the Canadian Legal Data dataset.",
+        "Searches and returns case law from the Canadian Legal Data dataset.",
     )
     tools = [tool]
 
     agent = create_react_agent(llm, tools, prompt)
-    
-    
 
     agent_executor = AgentExecutor(
         agent=agent,
@@ -120,10 +132,10 @@ async def lifespan(app: FastAPI):
         tools=tools,
         verbose=True,
         return_intermediate_steps=True,
+        handle_parsing_errors=True
     )
-    response = agent_executor.invoke({"input": "Where is the hometown of the 2007 US PGA championship winner and his score?"})
-    print(response)
 
+    agentsMap['agent'] = agent_executor
     
     yield
     print("Shutdown")
@@ -154,5 +166,5 @@ def read_root():
 async def read_item(request: RequestBody):
     print("Starting new request...")
     print(f"{request.firstName}, {request.lastName}, {request.caseDescription}, {request.intendedOutcome}")
-    response = agentsMap["chain"].invoke()
+    response = agentsMap['agent'].invoke({"caseDescription": request.caseDescription, "intendedOutcome": request.intendedOutcome})
     return response
