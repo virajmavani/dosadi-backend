@@ -1,65 +1,111 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from langchain.prompts import PromptTemplate
+from langchain_community.llms.octoai_endpoint import OctoAIEndpoint
+from langchain_community.embeddings import OctoAIEmbeddings
+from langchain_community.vectorstores import Milvus
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain.schema import Document
+from pymilvus import connections, utility
 
-agents = {}
+from pydantic import BaseModel
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+os.environ["OCTOAI_API_TOKEN"] = os.getenv("OCTOAI_API_TOKEN")
+milvus_uri = os.getenv("MILVUS_ENDPOINT")
+token = os.getenv("MILVUS_KEY")
+user = os.getenv("MILVUS_USER")
+password = os.getenv("MILVUS_PASSWORD")
+
+agentsMap = {}
+
+async def initializeVectorStore():
+    embeddings = OctoAIEmbeddings(endpoint_url="https://text.octoai.run/v1/embeddings")
+    connections.connect("default",
+                        uri=milvus_uri,
+                        token=token,
+                        user=user,
+                        password=password)
+    print(f"Connecting to DB: {milvus_uri}")
+    collection_name = "cities"
+    check_collection = utility.has_collection(collection_name)
+    if check_collection:
+        print(f"Collection Available!")
+        vector_store = Milvus(
+            embeddings,
+            connection_args={"uri": milvus_uri, "token": token},
+            collection_name=collection_name,
+        )
+    else:
+        files = os.listdir("./data")
+        file_texts = []
+
+        for file in files:
+            with open(f"./data/{file}") as f:
+                file_text = f.read()
+            text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
+                chunk_size=512, chunk_overlap=64, 
+            )
+            texts = text_splitter.split_text(file_text)
+            for i, chunked_text in enumerate(texts):
+                file_texts.append(Document(page_content=chunked_text, 
+                        metadata={"doc_title": file.split(".")[0], "chunk_num": i}))
+        
+        vector_store = Milvus.from_documents(
+            file_texts,
+            embedding=embeddings,
+            connection_args={"uri": milvus_uri, "token": token},
+            collection_name="cities"
+        )
+    return vector_store
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        storage_context = StorageContext.from_defaults(
-            persist_dir="./storage/events"
-        )
-        events_index = load_index_from_storage(storage_context)
+    template = """Answer the question based only on the following context:
+    {context}
 
-        index_loaded = True
-    except:
-        index_loaded = False
+    Question: {question}
+    """
+    prompt = PromptTemplate.from_template(template)
 
-    if not index_loaded:
-    # load data
-        events_doc = SimpleDirectoryReader(
-            input_files=["./data/seattle_events.pdf"]
-        ).load_data()
+    vector_store = await initializeVectorStore()
 
-        # build index
-        vector_store_events = MilvusVectorStore(dim=1536, collection_name="events", overwrite=True)
-        storage_context_events = StorageContext.from_defaults(vector_store=vector_store_events)
-        events_index = VectorStoreIndex.from_documents(events_doc, storage_context=storage_context_events)
-
-        # persist index
-        events_index.storage_context.persist(persist_dir="./storage/events")
-    
-    events_engine = events_index.as_query_engine(similarity_top_k=3)
-
-    query_engine_tool = [
-        QueryEngineTool(
-            query_engine=events_engine,
-            metadata=ToolMetadata(
-                name="events_10k",
-                description=(
-                    "Provides information about Events takingg place around Seattle area in the month of March 2024. "
-                    "Use a detailed plain text question as input to the tool."
-                ),
-            ),
-        )
-    ]
-    
-    llm = OpenAI(model="gpt-3.5-turbo-0613")
-
-    agent = ReActAgent.from_tools(
-        query_engine_tool,
-        llm=llm,
-        verbose=True,
-        # context=context
+    llm = OctoAIEndpoint(
+        endpoint_url="https://text.octoai.run/v1/chat/completions",
+        model_kwargs={
+            "model": "mixtral-8x7b-instruct-fp16",
+            "max_tokens": 128,
+            "presence_penalty": 0,
+            "temperature": 0.01,
+            "top_p": 0.9,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant. Keep your responses limited to one short paragraph if possible.",
+                },
+            ],
+        },
     )
-    print("i am in startup")
+    
+    retriever = vector_store.as_retriever()
+    
+    chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
 
-    agents["agent"]=agent
-    print("i am after agent")
+    agentsMap['chain'] = chain
     yield
     print("Shutdown")
-    #Clean up the ML models and release the resources
-    del data
+    #Clean up the ML models and release the resource
 
 app = FastAPI(lifespan=lifespan)
 
@@ -71,9 +117,9 @@ class RequestBody(BaseModel):
 def read_root():
     return {"Hello": "World"}
 
-@app.post("/plandate")
+@app.post("/")
 async def read_item(request: RequestBody):
     print("Starting new request...")
-    response = agents["agent"].chat(f"Given the events happening in Seattle in March, plan a date for two people; one of whom like {request.bio1} and other likes {request.bio2}. Provide output in the format of a timeline for the date.")
+    response = agentsMap["chain"].invoke(f"How big is the city of Boston?")
     print(str(response))
     return response
