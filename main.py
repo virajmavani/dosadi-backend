@@ -6,11 +6,10 @@ from langchain_community.llms.octoai_endpoint import OctoAIEndpoint
 from langchain_community.embeddings import OctoAIEmbeddings
 from langchain_community.vectorstores import Milvus
 from langchain.text_splitter import CharacterTextSplitter
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.schema import Document
 from langchain.tools.retriever import create_retriever_tool
+from langchain import hub
 from pymilvus import connections, utility
 from datasets import load_dataset
 from pydantic import BaseModel
@@ -77,11 +76,8 @@ async def initializeVectorStore():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     template = """Answer the following questions as best you can. You have access to the following tools:
-
     {tools}
-
     Use the following format:
-
     Question: the input question you must answer
     Thought: you should always think about what to do
     Action: the action to take, should be one of [{tool_names}]
@@ -90,13 +86,12 @@ async def lifespan(app: FastAPI):
     ... (this Thought/Action/Action Input/Observation can repeat N times)
     Thought: I now know the final answer
     Final Answer: the final answer to the original input question
-
     Begin!
-
-    Question: Given the case description: "{caseDescription}" and intended case outcome: "{intendedOutcome}, create a legal strategy to use in court."
+    Question: {input}
     Thought:{agent_scratchpad}
     """
     prompt = PromptTemplate.from_template(template)
+    # prompt = hub.pull("hwchase17/react")
 
     vector_store = await initializeVectorStore()
 
@@ -104,7 +99,7 @@ async def lifespan(app: FastAPI):
         endpoint_url="https://text.octoai.run/v1/chat/completions",
         model_kwargs={
             "model": "mixtral-8x7b-instruct-fp16",
-            "max_tokens": 128,
+            "max_tokens": 5000,
             "presence_penalty": 0,
             "temperature": 0.01,
             "top_p": 0.9,
@@ -132,7 +127,8 @@ async def lifespan(app: FastAPI):
         tools=tools,
         verbose=True,
         return_intermediate_steps=True,
-        handle_parsing_errors=True
+        handle_parsing_errors=True,
+        max_iterations=4,
     )
 
     agentsMap['agent'] = agent_executor
@@ -166,5 +162,5 @@ def read_root():
 async def read_item(request: RequestBody):
     print("Starting new request...")
     print(f"{request.firstName}, {request.lastName}, {request.caseDescription}, {request.intendedOutcome}")
-    response = agentsMap['agent'].invoke({"caseDescription": request.caseDescription, "intendedOutcome": request.intendedOutcome})
+    response = agentsMap['agent'].invoke({"input": f"Given the case description: {request.caseDescription} and intended case outcome: {request.intendedOutcome}, create a legal strategy to use in court as a bulleted list. Use atleast 50 words for the strategy."})
     return response
